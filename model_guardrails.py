@@ -2,84 +2,127 @@ import nltk, math
 from collections import Counter
 import torch
 from parameters import Parameters
+import re
 
-STOP_WORDS = set(["'", ".", "!", "?", ",", '"', '-', 'we', 'our', 'you', 'he', 'him', 'she', 'her', 'it', "it's", 'its', 'they', 'their', 'this', 'that', 'these', 'those', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'a', 'an', 'the', 'and', 'or', 'as', 'of', 'at', 'by', 'to', 'not', 'so', "'s", "in", "for", "with", "on"])
+params = Parameters()
+STOP_WORDS = set(["'", '#', '%', '+', ".", "!", "?", ",", '"', '-', ')', '(', 'we', 'our', 'you', 'he', 'him', 'she', 'her', 'it', "it's", 'its', 'they', 'their', 'this', 'that', 'these', 'those', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'a', 'an', 'the', 'and', 'or', 'as', 'of', 'at', 'by', 'to', 'not', 'so', "'s", "in", "for", "with", "on", "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours", "yourself", "yourselves", "he", "him", "his", "himself", "she", "her", "hers", "herself", "it", "its", "itself", "they", "them", "their", "theirs", "themselves", "what", "which", "who", "whom", "this", "that", "these", "those", "am", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "having", "do", "does", "did", "doing", "a", "an", "the", "and", "but", "if", "or", "because", "as", "until", "while", "of", "at", "by", "for", "with", "about", "against", "between", "into", "through", "during", "before", "after", "above", "below", "to", "from", "up", "down", "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here", "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very", "s", "t", "can", "will", "just", "don", "should", "now"])
 
 class PatternPenalty:
-    # Depending on how many words are used a large fraction of the last X summaries
+    # Penalize using the same n-gram >history_length/2 times in the last history_length summaries
     def __init__(self, history_length=30):
         self.stop_words = STOP_WORDS
         self.history_words = []
         self.ngram_history = []
         self.history_length = history_length
         self.device = Parameters().device
+        self.n = 2
 
-    def score(self, summaries, lengths=None):
-        batch_words = []
+    def score(self, words_list):
         batch_ngrams = []
-        for summary in summaries:
-            words = nltk.tokenize.word_tokenize(summary.lower())
-            gram = 2
-            n_grams = [tuple(words[i:(i+gram)]) for i in range(len(words)-gram+1)]
-
-            word_set = set(words)-self.stop_words
-            word_set = [w for w in word_set if len(w) > 1]
-            self.history_words.append(word_set)
+        for words in words_list:
+            n_grams = nltk.bigrams(words)
             self.ngram_history.append(n_grams)
-            batch_words.append(word_set)
             batch_ngrams.append(n_grams)
 
-        self.history_words = self.history_words[-self.history_length:] # Trim
         self.ngram_history = self.ngram_history[-self.history_length:] # Trim
 
-        word_counter = Counter([w for words in self.history_words for w in words])
         ngram_counter = Counter([ng for ngrams in self.ngram_history for ng in ngrams])
 
         scores = []
-        for words, ngrams in zip(batch_words, batch_ngrams):
-            score = 0.0
-
-            if any(word_counter[w] > 0.5*self.history_length for w in words):
-                score = 1.0
+        for ngrams in batch_ngrams:
             if any(ngram_counter[ng] > 0.5*self.history_length for ng in ngrams):
-                score = 1.0
-                # print(">>>",ngram_counter.most_common(8))
-            scores.append(score)
-        return torch.LongTensor(scores).to(self.device)
-
-class LengthPenalty:
-    # Depending on how many words are used a large fraction of the last X summaries
-    def __init__(self, target_length):
-        self.target_length = float(target_length)
-        self.device = Parameters().device
-
-    def score(self, summaries, lengths=None):
-        # In lengths, the number of tokens. Is -1 if the summary did not produce an END token, which will be maximum penalty, by design.
-        # scores = [1.0-L/self.target_length for L in lengths]
-        scores = [1.0 if L > self.target_length else 1.0-L/self.target_length for L in lengths] # This lets it go beyond for free
-
-        return torch.LongTensor(scores).to(self.device)
-
-class RepeatPenalty:
-    # Shouldn't use non-stop words several times in a summary. Fairly constraining.
-    def __init__(self):
-        self.stop_words = STOP_WORDS
-        self.device = Parameters().device
-
-    def score(self, summaries, lengths=None):
-        scores = []
-        for summary in summaries:
-            words = nltk.tokenize.word_tokenize(summary.lower())
-            L = len(words)
-            N_1 = max(2, math.ceil(L * 0.1)) # No word should be used more than 10% of the time
-            word_counts = Counter([w for w in words if w.lower() not in self.stop_words])
-            if word_counts.most_common(1)[0][1] > N_1:
-
-            # all_word_counts = Counter([w for w in words if len(w) > 1])
-            # if len(word_counts) > 0 and len(all_word_counts) > 0 and (word_counts.most_common(1)[0][1] > N_1 or all_word_counts.most_common(1)[0][1] > N_2):
-                # print(L, N_1, N_2)
-                # print("Repeat penalty:", word_counts.most_common(3), all_word_counts.most_common(3))
                 scores.append(1.0)
             else:
                 scores.append(0.0)
         return torch.LongTensor(scores).to(self.device)
+
+class LengthPenalty:
+    def __init__(self, target_length):
+        self.target_length = float(target_length)
+        self.device = Parameters().device
+
+    def score(self, words_list):
+        scores = []
+        for words in words_list:
+            L = len(words)
+            if L < 20:
+                scores.append(1.0)
+            elif L > 50:
+                scores.append(1.0)
+            else:
+                scores.append(0.0)
+
+        return torch.LongTensor(scores).to(self.device)
+
+class RepeatPenalty:
+     # No word should be used more than 5 times and no non-stop word should be used more than 3 times
+    def __init__(self):
+        self.stop_words = STOP_WORDS
+        self.device = Parameters().device
+
+    def score(self, words_list):
+        scores = []
+        for words in words_list:
+            L = len(words)
+            # N_1 = max(2, math.ceil(L * 0.1))
+            word_counts = Counter([w.lower() for w in words])
+            non_stop_word_counts = Counter([w.lower() for w in words if not w.lower() in self.stop_words])
+            try:
+                if word_counts.most_common(1)[0][1] > 5 or non_stop_word_counts.most_common(1)[0][1] > 3:
+                    scores.append(1.0)
+                else:
+                    scores.append(0.0)
+            except:
+                # Empty summary, will receive low fluency and coverage
+                scores.append(1.0)
+        return torch.LongTensor(scores).to(self.device)
+
+class InvalidCharacter:
+    def __init__(self):
+        self.invalid_chars = ['\n','\t','\r','*','#','@','~','\\','^','%','`','_',
+                                '<|pad|>','{','}','[',']','=']
+        self.device = Parameters().device
+        self.regex = re.compile(r"[A-Za-z]\.[A-Za-z]") # likely a link e.g. http://www.abc.com, abc.com, abc.co.uk, abc.co
+
+    def score(self, summaries):
+        scores = []
+        for summary in summaries:
+            if any(char in summary for char in self.invalid_chars) or self.regex.search(summary):
+                scores.append(1)
+            else:
+                scores.append(0)
+        return torch.LongTensor(scores).to(self.device)
+
+
+class Hotness:
+    def __init__(self):
+        with open(params.hotwords_filename,'r') as f:
+            self.hotwords = {}
+            s = 0.0
+            for line in f.readlines():
+                token = int(line.split(',')[0])
+                word = line.split(',')[1]
+                val = line.split(',')[2][:-1]
+                self.hotwords[token] = {'word':word, 'val':float(val)}
+                s += float(val)
+            for key in self.hotwords.keys():
+                self.hotwords[key]['val'] /= s
+            self.hot_tokens_set = set(self.hotwords.keys())
+            self.device = params.device
+
+    def score(self, tokenized_summs, tokenized_descs):
+        scores = []
+        for summary,desc in zip(tokenized_summs, tokenized_descs):
+            hot_tokens_in_desc = set(desc).intersection(self.hot_tokens_set)
+            score = 0.0
+            for token in hot_tokens_in_desc:
+                if token in summary:
+                    score += self.hotwords[token]['val']
+            if score > 0.015:
+                scores.append(1.0)
+            else:
+                scores.append(0.0)
+        return torch.LongTensor(scores).to(self.device)
+
+
+

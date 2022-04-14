@@ -1,19 +1,18 @@
-from transformers import BertTokenizer, BertForPreTraining
+from transformers import AutoModelForMaskedLM, DistilBertTokenizer
 import torch
 from torch.utils.data import DataLoader, RandomSampler
 import pandas as pd
 import random
-# import numpy as np
 from tqdm import tqdm
 import argparse
 from parameters import Parameters
 import os
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--learning_rate', type=float, default=8e-5)
-parser.add_argument('--n_epochs', type=int, default=15)
+parser.add_argument('--learning_rate', type=float, default=2e-5)
+parser.add_argument('--n_epochs', type=int, default=3)
 parser.add_argument('--batch_size', type=int, default=16)
-parser.add_argument('--train_test_split', type=float, default=0.8)
+parser.add_argument('--train_test_split', type=float, default=0.9)
 
 args = parser.parse_args()
 learning_rate = args.learning_rate
@@ -29,8 +28,9 @@ max_input_length = params.max_input_length
 
 model_name = "distilbert-base-uncased"
 
-tokenizer = BertTokenizer.from_pretrained(model_name)
-model = BertForPreTraining.from_pretrained(model_name)
+tokenizer = DistilBertTokenizer.from_pretrained(model_name)
+model = AutoModelForMaskedLM.from_pretrained(model_name)
+
 model.to(device)
 
 df = pd.read_csv(params.dataset_filename, low_memory=False)
@@ -157,14 +157,14 @@ optimizer_grouped_parameters = [
 optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=learning_rate)
 crit = torch.nn.CrossEntropyLoss(ignore_index=-1)
 scheduler = None
-milestones = list(range(3,n_epochs))
+milestones = list(range(5,n_epochs))
 gamma = 0.9
 scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
 
-def f1_score(mat):
-    precision = (mat[0,0] / mat[0,:].sum()).item()
-    recall = (mat[0,0] / mat[:,0].sum()).item()
-    return 2*precision*recall / (precision + recall)
+# def f1_score(mat):
+#     precision = (mat[0,0] / mat[0,:].sum()).item()
+#     recall = (mat[0,0] / mat[:,0].sum()).item()
+#     return 2*precision*recall / (precision + recall)
 
 if not os.path.isdir(params.model_today_dir):
     os.mkdir(params.model_today_dir)
@@ -188,18 +188,19 @@ for i_epoch in range(n_epochs):
     for ib, batch in enumerate(tqdm(dl_train, desc='Train, Epoch #{} - LR={}'.format(i_epoch, optimizer.param_groups[0]["lr"]))):
         batch = tuple(t.to(device) for t in batch)
         input_ids, input_mask, segment_ids, lm_label_ids, is_next = batch
-        out = model(input_ids=input_ids, attention_mask=input_mask, token_type_ids=segment_ids)
-        mlm_logits = out.prediction_logits
-        is_next_logits = out.seq_relationship_logits
+        # out = model(input_ids=input_ids, attention_mask=input_mask, token_type_ids=segment_ids)
+        out = model(input_ids=input_ids, attention_mask=input_mask)
+        mlm_logits = out.logits # mlm_logits = out.prediction_logits
+        # is_next_logits = out.seq_relationship_logits
         
         loss = crit(mlm_logits.view(-1, tokenizer.vocab_size), lm_label_ids.view(-1))
-        loss += crit(is_next_logits.view(-1, 2), is_next.view(-1))
+        # loss += crit(is_next_logits.view(-1, 2), is_next.view(-1))
         loss.backward()
 
-        nsp_guesses = torch.argmax(is_next_logits, dim=1)
-        for i in range(2):
-            for j in range(2):
-                nsp_confusion[i,j] += (nsp_guesses.eq(i) * is_next.eq(j)).float().sum().item()
+        # nsp_guesses = torch.argmax(is_next_logits, dim=1)
+        # for i in range(2):
+        #     for j in range(2):
+        #         nsp_confusion[i,j] += (nsp_guesses.eq(i) * is_next.eq(j)).float().sum().item()
 
         num_predicts_mlm = (~lm_label_ids.eq(-1)).sum().item()
         mlm_right = (lm_label_ids.view(-1).eq(torch.argmax(mlm_logits,dim=2).view(-1)).float().sum()).item()
@@ -214,7 +215,7 @@ for i_epoch in range(n_epochs):
     n_items = batch_size * len(dl_train)
     avg_train_loss = loss_sum / n_items
     avg_train_mlm_acc = mlm_right_sum / n_preds
-    avg_train_nsp_f1 = f1_score(nsp_confusion)
+    # avg_train_nsp_f1 = f1_score(nsp_confusion)
     avg_train_loss = loss_sum / n_items
 
     loss_sum = 0
@@ -225,17 +226,17 @@ for i_epoch in range(n_epochs):
         for ib, batch in enumerate(tqdm(dl_val, desc='Val, Epoch #{} - LR={}'.format(i_epoch, optimizer.param_groups[0]["lr"]))):
             batch = tuple(t.to(device) for t in batch)
             input_ids, input_mask, segment_ids, lm_label_ids, is_next = batch
-            out = model(input_ids=input_ids, attention_mask=input_mask, token_type_ids=segment_ids)
-            mlm_logits = out.prediction_logits
-            is_next_logits = out.seq_relationship_logits
+            out = model(input_ids=input_ids, attention_mask=input_mask)#, token_type_ids=segment_ids)
+            mlm_logits = out.logits #mlm_logits = out.prediction_logits
+            # is_next_logits = out.seq_relationship_logits
             
             loss = crit(mlm_logits.view(-1, tokenizer.vocab_size), lm_label_ids.view(-1))
-            loss += crit(is_next_logits.view(-1, 2), is_next.view(-1))
+            # loss += crit(is_next_logits.view(-1, 2), is_next.view(-1))
 
-            nsp_guesses = torch.argmax(is_next_logits, dim=1)
-            for i in range(2):
-                for j in range(2):
-                    nsp_confusion[i,j] += (nsp_guesses.eq(i) * is_next.eq(j)).float().sum().item()
+            # nsp_guesses = torch.argmax(is_next_logits, dim=1)
+            # for i in range(2):
+            #     for j in range(2):
+            #         nsp_confusion[i,j] += (nsp_guesses.eq(i) * is_next.eq(j)).float().sum().item()
 
             num_predicts_mlm = (~lm_label_ids.eq(-1)).sum().item()
             mlm_right = (lm_label_ids.view(-1).eq(torch.argmax(mlm_logits,dim=2).view(-1)).float().sum()).item()
@@ -246,10 +247,10 @@ for i_epoch in range(n_epochs):
         
     n_items = batch_size * len(dl_val)
     avg_val_mlm_acc = mlm_right_sum / n_preds
-    avg_val_nsp_f1 = f1_score(nsp_confusion)
+    # avg_val_nsp_f1 = f1_score(nsp_confusion)
     avg_val_loss = loss_sum / n_items
     
-    tmp = [i_epoch, avg_train_loss, avg_train_mlm_acc, avg_train_nsp_f1, avg_val_loss, avg_val_mlm_acc, avg_val_nsp_f1]
+    tmp = [i_epoch, avg_train_loss, avg_train_mlm_acc, avg_val_loss, avg_val_mlm_acc] #avg_train_nsp_f1, avg_val_loss, avg_val_mlm_acc, avg_val_nsp_f1]
     lines = ['\n' + ','.join([str(x) for x in tmp])]
     print(lines)
     model.save_pretrained(params.bert_model_dir.format(i_epoch))
